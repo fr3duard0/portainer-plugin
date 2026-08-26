@@ -20,10 +20,12 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -556,19 +558,200 @@ final class PortainerClient implements AutoCloseable {
     }
 
     /**
-     * Whether Portainer reports live Kubernetes applications for the stack.
+     * Whether Portainer reports live Kubernetes applications for the stack (existence only).
+     * Used for stale-stack abort before update — not post-deploy readiness.
      */
     boolean hasLiveStackResources(
             String baseUrl, String apiKey, int endpointId, int stackId, String stackName)
             throws IOException {
+        return !matchingStackApplications(baseUrl, apiKey, endpointId, stackId, stackName).isEmpty();
+    }
+
+    /**
+     * Poll workloads from YAML until Ready or timeout. Empty list → return immediately.
+     */
+    void waitUntilManifestWorkloadsReady(
+            String baseUrl,
+            String apiKey,
+            int endpointId,
+            List<ManifestWorkloads.Workload> workloads,
+            long timeoutMs,
+            long intervalMs)
+            throws IOException, InterruptedException {
+        if (workloads == null || workloads.isEmpty()) {
+            return;
+        }
+        long timeout = Math.max(1L, timeoutMs);
+        long interval = Math.max(1L, intervalMs);
+        long deadlineNs = System.nanoTime() + timeout * 1_000_000L;
+        Map<String, String> lastStates = new LinkedHashMap<>();
+        while (true) {
+            List<String> notReady = new ArrayList<>();
+            for (ManifestWorkloads.Workload workload : workloads) {
+                JsonNode resource = getWorkloadOrNull(baseUrl, apiKey, endpointId, workload);
+                ManifestWorkloadStates.Progress progress =
+                        ManifestWorkloadStates.classify(workload.kind(), resource);
+                String state = ManifestWorkloadStates.displayState(workload.kind(), resource);
+                String key = workload.display();
+                String previous = lastStates.put(key, state);
+                if (previous == null || !previous.equals(state)) {
+                    waitInfo(key + " state=" + state);
+                }
+                if (progress != ManifestWorkloadStates.Progress.READY) {
+                    notReady.add(key + " (" + state + ")");
+                }
+            }
+            if (notReady.isEmpty()) {
+                return;
+            }
+            long leftNs = deadlineNs - System.nanoTime();
+            if (leftNs <= 0) {
+                String extras = podsHint(baseUrl, apiKey, endpointId, ManifestWorkloads.namespaces(workloads));
+                throw new IOException(withAbortDetail(
+                        "Manifest workloads did not become ready within "
+                                + Math.max(1L, (timeout + 999L) / 1000L)
+                                + "s: "
+                                + String.join("; ", notReady),
+                        extras));
+            }
+            sleepWait(interval, leftNs);
+        }
+    }
+
+    /**
+     * Git path: poll Portainer applications for the stack until Ready or timeout.
+     */
+    void waitUntilStackApplicationsReady(
+            String baseUrl,
+            String apiKey,
+            int endpointId,
+            int stackId,
+            String stackName,
+            long timeoutMs,
+            long intervalMs)
+            throws IOException, InterruptedException {
+        long timeout = Math.max(1L, timeoutMs);
+        long interval = Math.max(1L, intervalMs);
+        long deadlineNs = System.nanoTime() + timeout * 1_000_000L;
+        String last = "missing";
+        while (true) {
+            List<JsonNode> apps = matchingStackApplications(baseUrl, apiKey, endpointId, stackId, stackName);
+            if (!apps.isEmpty()) {
+                List<String> notReady = new ArrayList<>();
+                boolean anyFailed = false;
+                for (JsonNode app : apps) {
+                    KubernetesWait.Progress progress = KubernetesWait.classifyApplication(app);
+                    String display = KubernetesWait.displayApplicationStatus(app);
+                    if (progress == KubernetesWait.Progress.FAILED) {
+                        anyFailed = true;
+                        notReady.add(display);
+                    } else if (progress != KubernetesWait.Progress.READY) {
+                        notReady.add(display);
+                    }
+                }
+                last = String.join(
+                        "; ",
+                        notReady.isEmpty()
+                                ? apps.stream().map(KubernetesWait::displayApplicationStatus).toList()
+                                : notReady);
+                if (notReady.isEmpty()) {
+                    return;
+                }
+                if (anyFailed) {
+                    String extras = podsHintForStackApps(baseUrl, apiKey, endpointId, apps);
+                    throw new IOException(withAbortDetail(
+                            "Manifest applications failed readiness: " + last, extras));
+                }
+            } else {
+                last = "missing";
+            }
+            long leftNs = deadlineNs - System.nanoTime();
+            if (leftNs <= 0) {
+                Set<String> nsHint = new LinkedHashSet<>();
+                for (JsonNode app : matchingStackApplications(
+                        baseUrl, apiKey, endpointId, stackId, stackName)) {
+                    String ns = firstNonBlank(
+                            text(app, "ResourcePool"), text(app, "Namespace"), text(app, "namespace"));
+                    if (!ns.isBlank()) {
+                        nsHint.add(ns);
+                    }
+                }
+                throw new IOException(withAbortDetail(
+                        "Manifest applications did not become ready within "
+                                + Math.max(1L, (timeout + 999L) / 1000L)
+                                + "s (last="
+                                + last
+                                + ")",
+                        podsHint(baseUrl, apiKey, endpointId, nsHint)));
+            }
+            if (!"missing".equals(last)) {
+                waitInfo("applications state=" + last);
+            }
+            sleepWait(interval, leftNs);
+        }
+    }
+
+    /**
+     * After Helm install: release deployed; labeled Deployments Ready when present.
+     */
+    void waitUntilHelmReleaseReady(
+            String baseUrl,
+            String apiKey,
+            int endpointId,
+            String releaseName,
+            String namespace,
+            long timeoutMs,
+            long intervalMs)
+            throws IOException, InterruptedException {
+        String release = releaseName == null ? "" : releaseName.trim();
+        String ns = namespace == null || namespace.isBlank() ? "default" : namespace.trim();
+        long timeout = Math.max(1L, timeoutMs);
+        long interval = Math.max(1L, intervalMs);
+        long deadlineNs = System.nanoTime() + timeout * 1_000_000L;
+        String last = "missing";
+        while (true) {
+            JsonNode found = findHelmRelease(baseUrl, apiKey, endpointId, release, ns);
+            KubernetesWait.Progress releaseProgress = KubernetesWait.classifyHelmRelease(found);
+            last = "release=" + KubernetesWait.displayHelmStatus(found);
+            if (releaseProgress == KubernetesWait.Progress.FAILED) {
+                throw new IOException(withAbortDetail(
+                        "Helm release failed: " + last,
+                        podsHint(baseUrl, apiKey, endpointId, Set.of(ns))));
+            }
+            if (releaseProgress == KubernetesWait.Progress.READY) {
+                List<String> notReady = helmWorkloadsNotReady(baseUrl, apiKey, endpointId, ns, release);
+                if (notReady.isEmpty()) {
+                    return;
+                }
+                last = last + " workloads=" + String.join("; ", notReady);
+            }
+            long leftNs = deadlineNs - System.nanoTime();
+            if (leftNs <= 0) {
+                throw new IOException(withAbortDetail(
+                        "Helm release did not become ready within "
+                                + Math.max(1L, (timeout + 999L) / 1000L)
+                                + "s (last="
+                                + last
+                                + ")",
+                        podsHint(baseUrl, apiKey, endpointId, Set.of(ns))));
+            }
+            waitInfo(last);
+            sleepWait(interval, leftNs);
+        }
+    }
+
+    private List<JsonNode> matchingStackApplications(
+            String baseUrl, String apiKey, int endpointId, int stackId, String stackName)
+            throws IOException {
         JsonNode apps = listApplications(baseUrl, apiKey, endpointId);
         String wantName = stackName == null ? "" : stackName.trim();
+        List<JsonNode> matched = new ArrayList<>();
         for (JsonNode app : apps) {
             if (applicationMatchesStack(app, stackId, wantName)) {
-                return true;
+                matched.add(app);
             }
         }
-        return false;
+        return matched;
     }
 
     private static boolean applicationMatchesStack(JsonNode app, int stackId, String stackName) {
@@ -588,6 +771,203 @@ final class PortainerClient implements AutoCloseable {
             }
         }
         return false;
+    }
+
+    private JsonNode findHelmRelease(
+            String baseUrl, String apiKey, int endpointId, String releaseName, String namespace)
+            throws IOException {
+        JsonNode releases = listHelmReleases(baseUrl, apiKey, endpointId, namespace);
+        if (!releases.isArray()) {
+            return null;
+        }
+        for (JsonNode r : releases) {
+            String name = firstNonBlank(text(r, "Name"), text(r, "name"));
+            if (!releaseName.equals(name)) {
+                continue;
+            }
+            String releaseNs = firstNonBlank(text(r, JSON_NAMESPACE), text(r, "namespace"));
+            if (namespace.isBlank() || releaseNs.isBlank() || namespace.equals(releaseNs)) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    private List<String> helmWorkloadsNotReady(
+            String baseUrl, String apiKey, int endpointId, String namespace, String releaseName)
+            throws IOException {
+        List<String> notReady = new ArrayList<>();
+        for (ManifestWorkloads.Kind kind : List.of(
+                ManifestWorkloads.Kind.DEPLOYMENT,
+                ManifestWorkloads.Kind.STATEFULSET,
+                ManifestWorkloads.Kind.DAEMONSET)) {
+            JsonNode list = listWorkloadsOrNull(baseUrl, apiKey, endpointId, kind, namespace, releaseName);
+            if (list == null) {
+                continue;
+            }
+            JsonNode items = list.path("items");
+            if (!items.isArray()) {
+                continue;
+            }
+            for (JsonNode item : items) {
+                String name = text(item.path("metadata"), "name");
+                if (name.isBlank()) {
+                    continue;
+                }
+                ManifestWorkloads.Workload w = new ManifestWorkloads.Workload(kind, namespace, name);
+                ManifestWorkloadStates.Progress progress = ManifestWorkloadStates.classify(kind, item);
+                if (progress != ManifestWorkloadStates.Progress.READY) {
+                    notReady.add(w.display() + " (" + ManifestWorkloadStates.displayState(kind, item) + ")");
+                }
+            }
+        }
+        return notReady;
+    }
+
+    private JsonNode getWorkloadOrNull(
+            String baseUrl, String apiKey, int endpointId, ManifestWorkloads.Workload workload)
+            throws IOException {
+        String url = kubernetesProxyPath(
+                baseUrl,
+                endpointId,
+                workload.kind().apiGroupVersion(),
+                workload.namespace(),
+                workload.kind().resource(),
+                workload.name(),
+                null);
+        try {
+            return httpJson("GET", url, apiKey, null, "get " + workload.display());
+        } catch (IOException e) {
+            if (isHttpStatus(e, 404)) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private JsonNode listWorkloadsOrNull(
+            String baseUrl,
+            String apiKey,
+            int endpointId,
+            ManifestWorkloads.Kind kind,
+            String namespace,
+            String releaseName)
+            throws IOException {
+        String selector = "app.kubernetes.io/instance=" + releaseName;
+        String url = kubernetesProxyPath(
+                baseUrl, endpointId, kind.apiGroupVersion(), namespace, kind.resource(), null, selector);
+        try {
+            return httpJson("GET", url, apiKey, null, "list " + kind.resource());
+        } catch (IOException e) {
+            if (isHttpStatus(e, 404) || isHttpStatus(e, 403)) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private String podsHint(String baseUrl, String apiKey, int endpointId, Set<String> namespaces)
+            throws IOException {
+        if (namespaces == null || namespaces.isEmpty()) {
+            return "";
+        }
+        List<String> problems = new ArrayList<>();
+        for (String ns : namespaces) {
+            JsonNode list = listPodsOrNull(baseUrl, apiKey, endpointId, ns);
+            if (list == null) {
+                continue;
+            }
+            JsonNode items = list.path("items");
+            if (!items.isArray()) {
+                continue;
+            }
+            for (JsonNode pod : items) {
+                String line = KubernetesPods.problemLine(pod);
+                if (!line.isBlank()) {
+                    problems.add(line);
+                }
+            }
+        }
+        return KubernetesPods.joined(problems);
+    }
+
+    private String podsHintForStackApps(
+            String baseUrl, String apiKey, int endpointId, List<JsonNode> apps) throws IOException {
+        Set<String> namespaces = new LinkedHashSet<>();
+        for (JsonNode app : apps) {
+            String ns = firstNonBlank(
+                    text(app, "ResourcePool"), text(app, "Namespace"), text(app, "namespace"));
+            if (!ns.isBlank()) {
+                namespaces.add(ns);
+            }
+        }
+        return podsHint(baseUrl, apiKey, endpointId, namespaces);
+    }
+
+    private JsonNode listPodsOrNull(String baseUrl, String apiKey, int endpointId, String namespace)
+            throws IOException {
+        String url = kubernetesProxyPath(baseUrl, endpointId, "v1", namespace, "pods", null, null);
+        try {
+            return httpJson("GET", url, apiKey, null, "list pods");
+        } catch (IOException e) {
+            if (isHttpStatus(e, 404) || isHttpStatus(e, 403)) {
+                return null;
+            }
+            return null;
+        }
+    }
+
+    private String kubernetesProxyPath(
+            String baseUrl,
+            int endpointId,
+            String apiGroupVersion,
+            String namespace,
+            String resource,
+            String name,
+            String labelSelector) {
+        String base = PortainerUrl.normalizeBaseUrl(baseUrl);
+        StringBuilder url = new StringBuilder(base)
+                .append(API_ENDPOINTS)
+                .append(endpointId)
+                .append("/kubernetes/");
+        if ("v1".equals(apiGroupVersion)) {
+            url.append("api/v1");
+        } else {
+            url.append("apis/").append(apiGroupVersion);
+        }
+        url.append("/namespaces/")
+                .append(encodePathSegment(namespace))
+                .append("/")
+                .append(resource);
+        if (name != null && !name.isBlank()) {
+            url.append("/").append(encodePathSegment(name));
+        }
+        if (labelSelector != null && !labelSelector.isBlank()) {
+            url.append("?labelSelector=")
+                    .append(java.net.URLEncoder.encode(labelSelector, StandardCharsets.UTF_8));
+        }
+        return url.toString();
+    }
+
+    private static String encodePathSegment(String value) {
+        return java.net.URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    private void waitInfo(String line) {
+        if (buildLog != null) {
+            buildLog.info(line);
+        }
+    }
+
+    private static void sleepWait(long intervalMs, long leftNs) throws InterruptedException {
+        Thread.sleep(Math.min(intervalMs, Math.max(1L, leftNs / 1_000_000L)));
+    }
+
+    private static String withAbortDetail(String title, String extras) {
+        if (extras == null || extras.isBlank()) {
+            return title;
+        }
+        return title + " — " + extras;
     }
 
     private static IOException mapEnsureNamespaceError(IOException e, String namespace) {
@@ -1707,7 +2087,9 @@ final class PortainerClient implements AutoCloseable {
         if (detail.length() <= MAX_ERROR_DETAIL_CHARS) {
             return detail;
         }
-        return detail.substring(0, MAX_ERROR_DETAIL_CHARS) + "…";
+        int head = Math.min(512, MAX_ERROR_DETAIL_CHARS / 4);
+        int tail = MAX_ERROR_DETAIL_CHARS - head - 1;
+        return detail.substring(0, head) + "…" + detail.substring(detail.length() - tail);
     }
 
     private static String text(JsonNode node, String field) {

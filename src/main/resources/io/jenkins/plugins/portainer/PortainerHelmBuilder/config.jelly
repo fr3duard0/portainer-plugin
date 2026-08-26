@@ -59,6 +59,9 @@
       <f:entry title="${%Ensure namespace}" field="ensureNamespace">
         <f:checkbox checked="${instance == null || instance.ensureNamespace}"/>
       </f:entry>
+      <f:entry title="${%Wait timeout (seconds)}" field="waitTimeoutSeconds">
+        <f:textbox default="300"/>
+      </f:entry>
       <f:entry title="${%Validate only}" field="validateOnly">
         <f:checkbox/>
       </f:entry>

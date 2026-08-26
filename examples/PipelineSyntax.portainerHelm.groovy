@@ -24,10 +24,12 @@ pipeline {
                     releaseName: 'demo-nginx',
                     chart: 'nginx',
                     repo: 'https://charts.example/helm',
+                    // repo: 'oci://registry.example/charts',  // OCI chart repo (no userinfo)
                     namespace: 'default',
                     // valuesSource: 'none',  // default — chart defaults only
                     // ensureNamespace: true,  // default; set false to skip
-                    atomic: true
+                    atomic: true,
+                    waitTimeoutSeconds: '300'  // poll release Ready after install (default 300)
                     // forceReinstall: true  // destructive: uninstall then install
                 )
             }

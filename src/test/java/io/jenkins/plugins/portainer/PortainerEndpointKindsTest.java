@@ -36,5 +36,7 @@ public class PortainerEndpointKindsTest {
                 () -> ChartRepositoryUrl.normalize("https://127.0.0.1/charts"));
         assertTrue(ChartRepositoryUrl.normalize("https://charts.example/helm")
                 .startsWith("https://charts.example"));
+        assertTrue(ChartRepositoryUrl.normalize("oci://registry.example/charts")
+                .startsWith("oci://registry.example"));
     }
 }

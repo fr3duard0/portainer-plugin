@@ -17,6 +17,7 @@ import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
+import jenkins.tasks.SimpleBuildStep;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -42,7 +43,7 @@ import java.util.logging.Logger;
  * Vault overlay: nested {@link VaultConnection} ({@code vaultNone} / {@code vaultInherit} /
  * {@code vaultManual}). Default Not connected. Path/mount apply when Inherit or Manual.
  */
-public class PortainerStackBuilder extends AbstractVaultStep {
+public class PortainerStackBuilder extends Builder implements SimpleBuildStep {
 
     private static final Logger LOGGER = Logger.getLogger(PortainerStackBuilder.class.getName());
 
@@ -108,16 +109,15 @@ public class PortainerStackBuilder extends AbstractVaultStep {
      */
     private boolean validateOnly;
 
+    /** Nested Vault overlay. Null means {@link VaultNone}. */
+    private VaultConnection vault;
+
     @DataBoundConstructor
     public PortainerStackBuilder(String endpointId, String stackType, String stackName) {
         this.endpointId = endpointId == null ? "" : endpointId.trim();
         this.stackType =
                 stackType == null || stackType.isBlank() ? TYPE_COMPOSE : stackType.trim();
         this.stackName = stackName == null ? "" : stackName.trim();
-    }
-
-    private Object readResolve() {
-        return readResolveVault(false);
     }
 
     public String getEndpointId() {

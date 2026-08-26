@@ -16,6 +16,7 @@ import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
+import jenkins.tasks.SimpleBuildStep;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -37,7 +38,7 @@ import java.util.logging.Logger;
  * Freestyle / Pipeline step: ensure Docker Swarm secrets from Vault KV v2
  * ({@code @Symbol("portainerStackSecret")}; alias {@code portainerSwarmSecret}).
  */
-public class PortainerSwarmSecretBuilder extends AbstractVaultStep {
+public class PortainerSwarmSecretBuilder extends Builder implements SimpleBuildStep {
 
     private static final Logger LOGGER = Logger.getLogger(PortainerSwarmSecretBuilder.class.getName());
 
@@ -60,13 +61,12 @@ public class PortainerSwarmSecretBuilder extends AbstractVaultStep {
     private boolean validateOnly;
     private boolean pruneOld;
 
+    /** Nested Vault overlay. Null or {@link VaultNone} means {@link VaultInherit}. */
+    private VaultConnection vault;
+
     @DataBoundConstructor
     public PortainerSwarmSecretBuilder(String endpointId) {
         this.endpointId = endpointId == null ? "" : endpointId.trim();
-    }
-
-    private Object readResolve() {
-        return readResolveVault(true);
     }
 
     public String getEndpointId() {

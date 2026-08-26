@@ -19,6 +19,8 @@ import hudson.util.FormValidation;
 import hudson.util.Secret;
 import jenkins.model.Jenkins;
 import net.sf.json.JSONObject;
+import org.htmlunit.html.HtmlForm;
+import org.htmlunit.html.HtmlPage;
 import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl;
 import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
 import org.jenkinsci.plugins.workflow.job.WorkflowJob;
@@ -322,23 +324,7 @@ public class PortainerSwarmSecretBuilderTest {
     }
 
     @Test
-    public void xstream_legacyVaultModes(JenkinsRule jenkins) throws Exception {
-        PortainerSwarmSecretBuilder none = loadBuilder(jenkins, "secret-legacy-vault-none.xml");
-        assertInstanceOf(VaultInherit.class, none.getVault());
-        assertEquals("apps/demo", none.getVault().getVaultPath());
-        assertFalse(Items.XSTREAM2.toXML(none).contains("<vaultConnectionMode>"));
-
-        PortainerSwarmSecretBuilder inherit = loadBuilder(jenkins, "secret-legacy-vault-inherit.xml");
-        assertInstanceOf(VaultInherit.class, inherit.getVault());
-        assertEquals("apps/demo", inherit.getVault().getVaultPath());
-        assertEquals("secret", inherit.getVault().getVaultMount());
-
-        PortainerSwarmSecretBuilder manual = loadBuilder(jenkins, "secret-legacy-vault-manual.xml");
-        assertInstanceOf(VaultManual.class, manual.getVault());
-        assertEquals("https://vault.example:8200", manual.getVault().getVaultUrl());
-        assertEquals("vault-approle", manual.getVault().getVaultAppRoleCredentialsId());
-        assertEquals("apps/demo", manual.getVault().getVaultPath());
-
+    public void xstream_nestedVaultNone_becomesInherit(JenkinsRule jenkins) throws Exception {
         PortainerSwarmSecretBuilder nestedNone = loadBuilder(jenkins, "secret-nested-vault-none.xml");
         assertInstanceOf(VaultInherit.class, nestedNone.getVault());
     }
@@ -357,6 +343,27 @@ public class PortainerSwarmSecretBuilderTest {
         PortainerSwarmSecretBuilder loaded = project.getBuildersList().get(PortainerSwarmSecretBuilder.class);
         assertInstanceOf(VaultInherit.class, loaded.getVault());
         assertFalse(loaded.getVault() instanceof VaultNone);
+        assertEquals("apps/demo", loaded.getVault().getVaultPath());
+    }
+
+    @Test
+    public void configurePage_showsVaultPath(JenkinsRule jenkins) throws Exception {
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerSwarmSecretBuilder step = new PortainerSwarmSecretBuilder("1");
+        VaultInherit inherit = new VaultInherit();
+        inherit.setVaultPath("apps/demo");
+        step.setVault(inherit);
+        step.setSecretKeys("app_key");
+        project.getBuildersList().add(step);
+
+        try (JenkinsRule.WebClient wc = jenkins.createWebClient()) {
+            HtmlPage page = wc.getPage(project, "configure");
+            HtmlForm form = page.getFormByName("config");
+            assertTrue(
+                    form.getInputsByName("_.vaultPath").stream()
+                            .anyMatch(input -> "apps/demo".equals(input.getValue())),
+                    "Vault path input must be rendered from Kv/common.jelly");
+        }
     }
 
     @Test

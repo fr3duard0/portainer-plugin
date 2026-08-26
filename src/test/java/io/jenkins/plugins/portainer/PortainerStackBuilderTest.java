@@ -31,7 +31,6 @@ import org.springframework.security.access.AccessDeniedException;
 import net.sf.json.JSONObject;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -41,7 +40,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -341,16 +339,6 @@ public class PortainerStackBuilderTest {
 
         assertInstanceOf(VaultNone.class, step.getVault());
         assertEquals(PortainerStackBuilder.MODE_INHERIT, step.getPortainerConnectionMode());
-    }
-
-    @Test
-    public void xstream_legacyVaultNone_staysNone(JenkinsRule jenkins) throws Exception {
-        try (InputStream in = PortainerStackBuilderTest.class.getResourceAsStream("stack-legacy-vault-none.xml")) {
-            assertNotNull(in);
-            PortainerStackBuilder step = (PortainerStackBuilder) hudson.model.Items.XSTREAM2.fromXML(in);
-            assertInstanceOf(VaultNone.class, step.getVault());
-            assertFalse(hudson.model.Items.XSTREAM2.toXML(step).contains("<vaultConnectionMode>"));
-        }
     }
 
     @Test
