@@ -142,7 +142,9 @@ class PortainerHelmBuilderTest {
                     helmListCalled.set(true);
                     if (releaseExists.get()) {
                         respond(exchange, 200,
-                                "[{\"Name\":\"nginx\",\"Namespace\":\"default\",\"Status\":\""
+                                "[{\"Name\":\"nginx\",\"Namespace\":\""
+                                        + helmListNamespace(exchange)
+                                        + "\",\"Status\":\""
                                         + releaseStatus.get() + "\"}]");
                     } else {
                         respond(exchange, 200, "[]");
@@ -680,6 +682,21 @@ class PortainerHelmBuilderTest {
         cfg.setPortainerUrl(base);
         cfg.setCredentialsId("portainer-api-key");
         cfg.save();
+    }
+
+    private static String helmListNamespace(HttpExchange exchange) {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null || query.isBlank()) {
+            return "default";
+        }
+        for (String part : query.split("&")) {
+            int eq = part.indexOf('=');
+            if (eq <= 0 || !"namespace".equals(part.substring(0, eq))) {
+                continue;
+            }
+            return java.net.URLDecoder.decode(part.substring(eq + 1), StandardCharsets.UTF_8);
+        }
+        return "default";
     }
 
     private static boolean isHelmMutateApi(String path, String method) {
