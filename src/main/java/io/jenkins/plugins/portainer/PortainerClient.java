@@ -723,7 +723,10 @@ final class PortainerClient implements AutoCloseable {
                 if (notReady.isEmpty()) {
                     return;
                 }
-                last = last + " workloads=" + String.join("; ", notReady);
+                last = "release="
+                        + KubernetesWait.displayHelmStatus(found)
+                        + " workloads="
+                        + String.join("; ", notReady);
             }
             long leftNs = deadlineNs - System.nanoTime();
             if (leftNs <= 0) {
