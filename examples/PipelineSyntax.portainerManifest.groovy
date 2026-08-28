@@ -13,6 +13,7 @@ pipeline {
                     endpointId: '2',
                     stackName: 'demo-web',
                     stackSource: 'yaml',
+                    waitTimeoutSeconds: '300',  // poll workloads Ready after apply (default 300)
                     stackFileContent: '''
 apiVersion: apps/v1
 kind: Deployment

@@ -213,10 +213,14 @@ final class PortainerConnections {
         if (msg == null || msg.isBlank()) {
             msg = e.getClass().getSimpleName();
         }
-        if (msg.length() > PortainerClient.MAX_ERROR_DETAIL_CHARS) {
-            msg = msg.substring(0, PortainerClient.MAX_ERROR_DETAIL_CHARS) + "…";
+        int max = PortainerClient.MAX_ERROR_DETAIL_CHARS;
+        if (msg.length() <= max) {
+            return msg;
         }
-        return msg;
+        // Keep HTTP status / kstatus near the start and helm Error near the end.
+        int head = Math.min(512, max / 4);
+        int tail = max - head - 1;
+        return msg.substring(0, head) + "…" + msg.substring(msg.length() - tail);
     }
 
     /** SHA-256 hex truncated for logs — never the YAML body. */

@@ -4,10 +4,7 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.AbortException;
 import hudson.EnvVars;
 import hudson.Extension;
-import hudson.Launcher;
-import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
 import hudson.model.Descriptor;
 import hudson.model.Item;
 import hudson.model.Run;
@@ -16,6 +13,7 @@ import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
+import jenkins.tasks.SimpleBuildStep;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -37,7 +35,7 @@ import java.util.logging.Logger;
  * Freestyle / Pipeline step: ensure Docker Swarm secrets from Vault KV v2
  * ({@code @Symbol("portainerStackSecret")}; alias {@code portainerSwarmSecret}).
  */
-public class PortainerSwarmSecretBuilder extends AbstractVaultStep {
+public class PortainerSwarmSecretBuilder extends Builder implements SimpleBuildStep {
 
     private static final Logger LOGGER = Logger.getLogger(PortainerSwarmSecretBuilder.class.getName());
 
@@ -60,13 +58,12 @@ public class PortainerSwarmSecretBuilder extends AbstractVaultStep {
     private boolean validateOnly;
     private boolean pruneOld;
 
+    /** Nested Vault overlay. Null or {@link VaultNone} means {@link VaultInherit}. */
+    private VaultConnection vault;
+
     @DataBoundConstructor
     public PortainerSwarmSecretBuilder(String endpointId) {
         this.endpointId = endpointId == null ? "" : endpointId.trim();
-    }
-
-    private Object readResolve() {
-        return readResolveVault(true);
     }
 
     public String getEndpointId() {
@@ -160,12 +157,6 @@ public class PortainerSwarmSecretBuilder extends AbstractVaultStep {
     @Override
     public boolean requiresWorkspace() {
         return false;
-    }
-
-    @Override
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener)
-            throws InterruptedException, IOException {
-        return PortainerSteps.performFreestyle(build, launcher, listener, this);
     }
 
     @Override

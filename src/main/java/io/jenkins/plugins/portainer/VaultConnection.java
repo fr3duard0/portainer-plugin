@@ -1,5 +1,6 @@
 package io.jenkins.plugins.portainer;
 
+import hudson.model.Describable;
 import hudson.model.Descriptor;
 import hudson.model.Item;
 import hudson.util.FormValidation;
@@ -16,7 +17,7 @@ import java.util.List;
  * Nested Vault connection on Stack / Secret. Freestyle: {@code f:dropdownDescriptorSelector}.
  * Pipeline symbols: {@code vaultNone}, {@code vaultInherit}, {@code vaultManual}.
  */
-public abstract class VaultConnection extends hudson.model.AbstractDescribableImpl<VaultConnection> {
+public abstract class VaultConnection implements Describable<VaultConnection> {
 
     public abstract String getMode();
 
@@ -69,77 +70,6 @@ public abstract class VaultConnection extends hudson.model.AbstractDescribableIm
         return out;
     }
 
-    /**
-     * Former persisted {@code vaultConnectionMode} siblings on Stack/Secret (XStream leftover).
-     */
-    record Leftover(
-            String mode,
-            String url,
-            String credentialsId,
-            String path,
-            String mount,
-            String namespace,
-            String version) {}
-
-    /**
-     * XStream leftover fields on Stack/Secret. When {@code vault} is already nested, it is kept
-     * (Secret still replaces {@link VaultNone}). Leftover strings are not cleared here.
-     */
-    static VaultConnection migrate(VaultConnection vault, Leftover leftover, boolean secretStep) {
-        VaultConnection resolved = vault;
-        if (resolved == null) {
-            resolved = fromLegacy(leftover, secretStep);
-        }
-        if (secretStep && resolved instanceof VaultNone) {
-            return new VaultInherit();
-        }
-        return resolved;
-    }
-
-    /**
-     * Former persisted Stack/Secret fields ({@code vaultConnectionMode} + siblings).
-     * Stack default is none; Secret maps explicit none to inherit.
-     */
-    static VaultConnection fromLegacy(Leftover leftover, boolean secretStep) {
-        String normalized = blankToNull(leftover.mode());
-        if (normalized != null) {
-            String resolved = ConnectionMode.normalize(
-                    normalized, secretStep ? ConnectionMode.INHERIT : ConnectionMode.NONE);
-            if (secretStep && ConnectionMode.isNone(resolved)) {
-                resolved = ConnectionMode.INHERIT;
-            }
-            return fromMode(resolved, leftover);
-        }
-        if (nonBlank(leftover.url()) || nonBlank(leftover.credentialsId())) {
-            return fromMode(ConnectionMode.MANUAL, leftover);
-        }
-        if (nonBlank(leftover.path())) {
-            return fromMode(ConnectionMode.INHERIT, leftover);
-        }
-        return secretStep ? new VaultInherit() : new VaultNone();
-    }
-
-    private static VaultConnection fromMode(String mode, Leftover leftover) {
-        if (ConnectionMode.isNone(mode)) {
-            return new VaultNone();
-        }
-        if (ConnectionMode.isManual(mode)) {
-            VaultManual manual = new VaultManual(leftover.url(), leftover.credentialsId());
-            applyKv(manual, leftover);
-            return manual;
-        }
-        VaultInherit inherit = new VaultInherit();
-        applyKv(inherit, leftover);
-        return inherit;
-    }
-
-    private static void applyKv(Kv kv, Leftover leftover) {
-        kv.setVaultPath(leftover.path());
-        kv.setVaultMount(leftover.mount());
-        kv.setVaultNamespace(leftover.namespace());
-        kv.setVaultVersion(leftover.version());
-    }
-
     static FormValidation checkUrl(String value) {
         if (value == null || value.isBlank()) {
             return FormValidation.ok();
@@ -190,10 +120,6 @@ public abstract class VaultConnection extends hudson.model.AbstractDescribableIm
 
     static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value.trim();
-    }
-
-    private static boolean nonBlank(String value) {
-        return value != null && !value.isBlank();
     }
 
     /** Inherit / Manual KV fields. */
@@ -249,6 +175,11 @@ public abstract class VaultConnection extends hudson.model.AbstractDescribableIm
      * on subclass descriptors.
      */
     public abstract static class KvDescriptor extends Descriptor<VaultConnection> {
+
+        /** Class whose views include {@code VaultConnection/Kv/common.jelly}. */
+        public Class<?> getKvViewClass() {
+            return Kv.class;
+        }
 
         @POST
         public FormValidation doCheckVaultPath(@QueryParameter String value, @AncestorInPath Item item) {

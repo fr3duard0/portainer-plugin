@@ -50,8 +50,6 @@ Optional step forms:
 
 ![Job configure → Portainer Stack Secret](docs/images/step-secret.png)
 
-Screenshot checklist: [`docs/images/README.md`](docs/images/README.md). Use only `*.example` hosts; never show real API tokens.
-
 ## Quick start
 
 1. In Portainer: **My account → Access tokens → Add access token**. Copy the token once.
@@ -102,8 +100,8 @@ More examples:
 | **Portainer Stack Deployment** | `portainerStack` | Create/update Compose or Swarm stacks from Git or manual YAML; optional Vault → Env |
 | **Portainer Stack Config** | `portainerStackConfig` (`portainerSwarmConfig`) | Ensure Swarm configs from a Git path; publish env keys for the Stack step |
 | **Portainer Stack Secret** | `portainerStackSecret` (`portainerSwarmSecret`) | Ensure Swarm secrets from Vault KV v2; publish env keys for external secrets |
-| **Portainer Manifest Deployment** | `portainerManifest` | Apply Kubernetes manifests (Kubernetes endpoint only) |
-| **Portainer Helm Deployment** | `portainerHelm` | Install/upgrade Helm charts (Kubernetes endpoint only) |
+| **Portainer Manifest Deployment** | `portainerManifest` | Apply Kubernetes manifests; wait until workloads Ready (`waitTimeoutSeconds`) |
+| **Portainer Helm Deployment** | `portainerHelm` | Install/upgrade Helm charts (`http`/`https`/`oci://` repo); wait until release Ready |
 
 **Suggested Swarm order:** Stack Secret (if used) → Stack Config → Stack Deployment.
 

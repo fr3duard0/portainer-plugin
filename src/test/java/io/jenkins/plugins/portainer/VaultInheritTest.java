@@ -14,16 +14,25 @@ import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
 import org.springframework.security.access.AccessDeniedException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @WithJenkins
 public class VaultInheritTest {
 
     @Test
+    void inherit_modeIsInherit() {
+        VaultInherit inherit = new VaultInherit();
+        assertEquals(ConnectionMode.INHERIT, inherit.getMode());
+        assertFalse(inherit.isNone());
+    }
+
+    @Test
     public void descriptor_displayNameAndSummary(JenkinsRule jenkins) {
         VaultInherit.DescriptorImpl d =
                 jenkins.jenkins.getDescriptorByType(VaultInherit.DescriptorImpl.class);
         assertEquals("Inherit from System", d.getDisplayName());
+        assertEquals(VaultConnection.Kv.class, d.getKvViewClass());
         assertEquals(VaultPluginInherit.inheritSummary(), d.getVaultInheritSummary());
         assertEquals("Vault Plugin is not configured.", d.getVaultInheritSummary());
     }

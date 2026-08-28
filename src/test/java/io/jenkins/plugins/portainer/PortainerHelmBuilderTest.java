@@ -42,6 +42,8 @@ class PortainerHelmBuilderTest {
     private final AtomicReference<String> lastMethod = new AtomicReference<>();
     private final AtomicReference<String> lastInstallBody = new AtomicReference<>();
     private final AtomicBoolean releaseExists = new AtomicBoolean(false);
+    private final AtomicReference<String> releaseStatus = new AtomicReference<>("deployed");
+    private final AtomicBoolean podsCrashLoop = new AtomicBoolean(false);
     private final AtomicInteger endpointType = new AtomicInteger(5);
     private final AtomicBoolean installCalled = new AtomicBoolean(false);
     private final AtomicBoolean uninstallCalled = new AtomicBoolean(false);
@@ -54,7 +56,10 @@ class PortainerHelmBuilderTest {
     @BeforeEach
     void startServer() throws IOException {
         System.setProperty(ConnectionTester.ALLOW_LOOPBACK_FOR_TESTS_PROP, "true");
+        System.setProperty(KubernetesWait.POLL_INTERVAL_MS_PROP, "50");
         releaseExists.set(false);
+        releaseStatus.set("deployed");
+        podsCrashLoop.set(false);
         endpointType.set(5);
         installCalled.set(false);
         uninstallCalled.set(false);
@@ -105,12 +110,42 @@ class PortainerHelmBuilderTest {
                 respond(exchange, 200, "{\"Name\":\"default\"}");
                 return;
             }
+            if (path != null && path.contains("/kubernetes/apis/")
+                    && path.contains("/deployments")
+                    && "GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                respond(exchange, 200, "{\"items\":[]}");
+                return;
+            }
+            if (path != null && path.contains("/kubernetes/apis/")
+                    && (path.contains("/statefulsets") || path.contains("/daemonsets"))
+                    && "GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                respond(exchange, 200, "{\"items\":[]}");
+                return;
+            }
+            if (path != null && path.contains("/kubernetes/api/v1/namespaces/")
+                    && path.endsWith("/pods")
+                    && "GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                if (podsCrashLoop.get()) {
+                    respond(exchange, 200,
+                            "{\"items\":[{\"metadata\":{\"name\":\"nginx-0\"},"
+                                    + "\"status\":{\"phase\":\"Pending\","
+                                    + "\"containerStatuses\":[{\"name\":\"c\","
+                                    + "\"state\":{\"waiting\":{\"reason\":\"CrashLoopBackOff\","
+                                    + "\"message\":\"back-off\"}}}]}}]}");
+                } else {
+                    respond(exchange, 200, "{\"items\":[]}");
+                }
+                return;
+            }
             if (path != null && path.matches("/api/endpoints/\\d+/kubernetes/helm$")) {
                 if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
                     helmListCalled.set(true);
                     if (releaseExists.get()) {
                         respond(exchange, 200,
-                                "[{\"Name\":\"nginx\",\"Namespace\":\"default\"}]");
+                                "[{\"Name\":\"nginx\",\"Namespace\":\""
+                                        + helmListNamespace(exchange)
+                                        + "\",\"Status\":\""
+                                        + releaseStatus.get() + "\"}]");
                     } else {
                         respond(exchange, 200, "[]");
                     }
@@ -121,6 +156,7 @@ class PortainerHelmBuilderTest {
                     helmMutationOrder.add("POST");
                     lastInstallBody.set(new String(
                             exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                    releaseExists.set(true);
                     respond(exchange, 201, "{\"name\":\"nginx\",\"namespace\":\"default\"}");
                     return;
                 }
@@ -129,6 +165,7 @@ class PortainerHelmBuilderTest {
                     && "DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
                 uninstallCalled.set(true);
                 helmMutationOrder.add("DELETE");
+                releaseExists.set(false);
                 respond(exchange, 200, "{}");
                 return;
             }
@@ -141,16 +178,41 @@ class PortainerHelmBuilderTest {
     @AfterEach
     void stopServer() {
         System.clearProperty(ConnectionTester.ALLOW_LOOPBACK_FOR_TESTS_PROP);
+        System.clearProperty(KubernetesWait.POLL_INTERVAL_MS_PROP);
         if (server != null) {
             server.stop(0);
         }
     }
 
     @Test
-    void ensureNamespace_defaultsTrue() {
-        assertTrue(new PortainerHelmBuilder(
-                        "1", "nginx", "nginx", "https://charts.example/bitnami")
-                .isEnsureNamespace());
+    void chartRepo_acceptsOciInValidateOnly(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerHelmBuilder step = new PortainerHelmBuilder(
+                "1", "nginx", "nginx", "oci://registry.example/charts");
+        step.setValidateOnly(true);
+        project.getBuildersList().add(step);
+        jenkins.buildAndAssertSuccess(project);
+        assertFalse(installCalled.get());
+    }
+
+    @Test
+    void freestyle_waitTimeout_includesPodsHint(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        releaseStatus.set("pending");
+        podsCrashLoop.set(true);
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerHelmBuilder step = new PortainerHelmBuilder(
+                "1", "nginx", "nginx", "https://charts.example/bitnami");
+        step.setNamespace("default");
+        step.setValuesSource(PortainerHelmBuilder.VALUES_NONE);
+        step.setWaitTimeoutSeconds("1");
+        project.getBuildersList().add(step);
+
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Helm release did not become ready", build);
+        jenkins.assertLogContains("CrashLoopBackOff", build);
+        assertTrue(installCalled.get());
     }
 
     @Test
@@ -605,6 +667,51 @@ class PortainerHelmBuilderTest {
         assertEquals(FormValidation.Kind.OK, d.doCheckValuesRepositoryUrl("", "none", project).kind);
         assertEquals(FormValidation.Kind.ERROR, d.doCheckValues("", "yaml", project).kind);
         assertEquals(FormValidation.Kind.OK, d.doCheckValues("", "none", project).kind);
+        assertEquals(
+                FormValidation.Kind.ERROR, d.doCheckValues("plain text", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckValues("replicaCount: 1\n", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK, d.doCheckValuesFilePath("values.yaml", "repository", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckValuesRepositoryUrl("https://gitlab.example/group/v.git", "repository", project)
+                        .kind);
+    }
+
+    @Test
+    void formValidation_releaseChartRepoNamespace(JenkinsRule jenkins) throws Exception {
+        PortainerHelmBuilder.DescriptorImpl d =
+                jenkins.getInstance().getDescriptorByType(PortainerHelmBuilder.DescriptorImpl.class);
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckReleaseName("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckReleaseName("$REL", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckReleaseName("nginx", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckChart("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckChart("nginx", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckRepo("", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckRepo("not-a-url", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckRepo("https://charts.example/helm", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("$NS", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckNamespace("Bad_NS", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("default", project).kind);
+    }
+
+    @Test
+    void freestyle_invalidWaitTimeout_fails(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerHelmBuilder step = new PortainerHelmBuilder(
+                "1", "nginx", "nginx", "https://charts.example/bitnami");
+        step.setValuesSource(PortainerHelmBuilder.VALUES_NONE);
+        step.setWaitTimeoutSeconds("0");
+        step.setValidateOnly(true);
+        project.getBuildersList().add(step);
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Wait timeout must be a positive number of seconds", build);
     }
 
     private void configurePortainer() {
@@ -620,6 +727,21 @@ class PortainerHelmBuilderTest {
         cfg.setPortainerUrl(base);
         cfg.setCredentialsId("portainer-api-key");
         cfg.save();
+    }
+
+    private static String helmListNamespace(HttpExchange exchange) {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null || query.isBlank()) {
+            return "default";
+        }
+        for (String part : query.split("&")) {
+            int eq = part.indexOf('=');
+            if (eq <= 0 || !"namespace".equals(part.substring(0, eq))) {
+                continue;
+            }
+            return java.net.URLDecoder.decode(part.substring(eq + 1), StandardCharsets.UTF_8);
+        }
+        return "default";
     }
 
     private static boolean isHelmMutateApi(String path, String method) {

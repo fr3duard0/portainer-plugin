@@ -6,9 +6,7 @@ import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
-import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
 import hudson.model.Item;
 import hudson.model.Run;
 import hudson.model.TaskListener;
@@ -78,6 +76,7 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
     private boolean verboseLogging;
     /** When true, preflight + field checks only — no list/install/uninstall / ensure-NS. */
     private boolean validateOnly;
+    private String waitTimeoutSeconds;
 
     /** Null uses {@link GitRepositoryFiles#readFile}. */
     transient GitRepositoryFiles.Reader gitReader;
@@ -268,6 +267,19 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
         this.validateOnly = validateOnly;
     }
 
+    public String getWaitTimeoutSeconds() {
+        return waitTimeoutSeconds == null || waitTimeoutSeconds.isBlank()
+                ? String.valueOf(KubernetesWait.DEFAULT_TIMEOUT_SECONDS)
+                : waitTimeoutSeconds.trim();
+    }
+
+    @DataBoundSetter
+    public void setWaitTimeoutSeconds(String waitTimeoutSeconds) {
+        this.waitTimeoutSeconds = waitTimeoutSeconds == null || waitTimeoutSeconds.isBlank()
+                ? null
+                : waitTimeoutSeconds.trim();
+    }
+
     public boolean isEnsureNamespace() {
         return ensureNamespace;
     }
@@ -284,12 +296,6 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
     @Override
     public boolean requiresWorkspace() {
         return HelmValuesSource.isRepository(getValuesSource());
-    }
-
-    @Override
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener)
-            throws InterruptedException, IOException {
-        return PortainerSteps.performFreestyle(build, launcher, listener, this);
     }
 
     @Override
@@ -400,8 +406,19 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                 ? null
                 : buildEnv.expand(version).trim();
         final String expandedChart = buildEnv.expand(chart).trim();
+        final int waitSeconds = PortainerConnections.abortOn(log, () -> {
+            String raw = waitTimeoutSeconds == null ? "" : buildEnv.expand(waitTimeoutSeconds).trim();
+            return KubernetesWait.parseTimeoutSeconds(raw);
+        });
         return new HelmParsedInputs(
-                expandedRelease, expandedNamespace, endpoint, mode, chartRepo, chartVersion, expandedChart);
+                expandedRelease,
+                expandedNamespace,
+                endpoint,
+                mode,
+                chartRepo,
+                chartVersion,
+                expandedChart,
+                waitSeconds);
     }
 
     private String helmDebugExtras(HelmParsedInputs inputs) {
@@ -452,7 +469,8 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                 + " chart=" + inputs.chart
                 + " namespace=" + inputs.namespace
                 + (blank(inputs.chartVersion) ? "" : " version=" + inputs.chartVersion)
-                + " valuesSource=" + inputs.mode);
+                + " valuesSource=" + inputs.mode
+                + " waitTimeoutSeconds=" + inputs.waitTimeoutSeconds);
         summarize(log, startedNs, "validated", inputs.release, inputs.chart, inputs.chartVersion);
     }
 
@@ -476,7 +494,8 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                             inputs.chartRepo,
                             inputs.namespace,
                             inputs.chartVersion,
-                            valuesYaml),
+                            valuesYaml,
+                            inputs.waitTimeoutSeconds),
                     log);
             summarize(log, startedNs, outcome, inputs.release, inputs.chart, inputs.chartVersion);
         } catch (AbortException e) {
@@ -519,6 +538,20 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                         params.chartVersion,
                         params.valuesYaml,
                         atomic));
+        log.info("Waiting for Helm release timeoutSeconds=" + params.waitTimeoutSeconds);
+        try {
+            client.waitUntilHelmReleaseReady(
+                    connection.baseUrl,
+                    apiKey,
+                    endpoint,
+                    params.release,
+                    params.namespace,
+                    params.waitTimeoutSeconds * 1000L,
+                    KubernetesWait.pollIntervalMs());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Helm wait interrupted", e);
+        }
         return exists ? "updated" : "created";
     }
 
@@ -686,6 +719,7 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
         final String chartRepo;
         final String chartVersion;
         final String chart;
+        final int waitTimeoutSeconds;
 
         HelmParsedInputs(
                 String release,
@@ -694,7 +728,8 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                 String mode,
                 String chartRepo,
                 String chartVersion,
-                String chart) {
+                String chart,
+                int waitTimeoutSeconds) {
             this.release = release;
             this.namespace = namespace;
             this.endpoint = endpoint;
@@ -702,6 +737,7 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
             this.chartRepo = chartRepo;
             this.chartVersion = chartVersion;
             this.chart = chart;
+            this.waitTimeoutSeconds = waitTimeoutSeconds;
         }
     }
 
@@ -755,6 +791,7 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
         final String namespace;
         final String chartVersion;
         final String valuesYaml;
+        final int waitTimeoutSeconds;
 
         HelmDeployParams(
                 String release,
@@ -762,13 +799,15 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
                 String chartRepo,
                 String namespace,
                 String chartVersion,
-                String valuesYaml) {
+                String valuesYaml,
+                int waitTimeoutSeconds) {
             this.release = release;
             this.chartName = chartName;
             this.chartRepo = chartRepo;
             this.namespace = namespace;
             this.chartVersion = chartVersion;
             this.valuesYaml = valuesYaml;
+            this.waitTimeoutSeconds = waitTimeoutSeconds;
         }
     }
 

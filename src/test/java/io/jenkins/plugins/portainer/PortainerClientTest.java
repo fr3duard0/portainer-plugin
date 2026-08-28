@@ -968,11 +968,10 @@ public class PortainerClientTest {
         String detail = "x".repeat(PortainerClient.MAX_ERROR_DETAIL_CHARS + 50);
         String json = "{\"message\":\"" + detail + "\"}";
         String extracted = PortainerClient.extractErrorDetail(json.getBytes(StandardCharsets.UTF_8));
-        assertEquals(PortainerClient.MAX_ERROR_DETAIL_CHARS + 1, extracted.length());
-        assertTrue(extracted.endsWith("…"));
-        assertEquals(
-                "x".repeat(PortainerClient.MAX_ERROR_DETAIL_CHARS),
-                extracted.substring(0, PortainerClient.MAX_ERROR_DETAIL_CHARS));
+        assertEquals(PortainerClient.MAX_ERROR_DETAIL_CHARS, extracted.length());
+        assertTrue(extracted.contains("…"));
+        assertTrue(extracted.startsWith("xxxx"));
+        assertTrue(extracted.endsWith("xxxx"));
     }
 
     @Test

@@ -30,8 +30,7 @@ import java.util.logging.Logger;
  *   <li>Preflight: {@code Preflight check of Vault|Git|endpoint N (name)}</li>
  *   <li>INFO = counts / outcomes; DEBUG (verbose) = names, hashes, exists/missing, env lists</li>
  *   <li>Soft prune → {@code [WARN]}; successful prune → {@code [INFO] Pruned: …}</li>
- *   <li>One {@code [ERROR]} inside the frame; Freestyle without second {@code ERROR: Portainer:}
- *       ({@link PortainerLoggedAbort})</li>
+ *   <li>One {@code [ERROR]} inside the frame</li>
  *   <li>Never log secret values, tokens, or passwords</li>
  * </ul>
  */

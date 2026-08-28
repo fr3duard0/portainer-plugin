@@ -53,10 +53,22 @@ public class PortainerManifestBuilderTest {
     private final AtomicBoolean createReturnsStackId = new AtomicBoolean(false);
     private final AtomicReference<String> lastCreatePath = new AtomicReference<>();
     private final AtomicBoolean applicationsEmpty = new AtomicBoolean(false);
+    private final AtomicBoolean deploymentReady = new AtomicBoolean(true);
+
+    private static final String DEPLOYMENT_YAML = """
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: web
+              namespace: apps
+            spec:
+              replicas: 1
+            """;
 
     @BeforeEach
     public void startServer() throws IOException {
         System.setProperty(ConnectionTester.ALLOW_LOOPBACK_FOR_TESTS_PROP, "true");
+        System.setProperty(KubernetesWait.POLL_INTERVAL_MS_PROP, "50");
         stacksEmpty.set(true);
         endpointType.set(5);
         stacksListCalls.set(0);
@@ -68,6 +80,7 @@ public class PortainerManifestBuilderTest {
         lastPath.set(null);
         lastMethod.set(null);
         applicationsEmpty.set(false);
+        deploymentReady.set(true);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
             lastPath.set(exchange.getRequestURI().getPath());
@@ -95,8 +108,36 @@ public class PortainerManifestBuilderTest {
                 if (applicationsEmpty.get()) {
                     respond(exchange, 200, "[]");
                 } else {
-                    respond(exchange, 200, "[{\"Name\":\"demo\",\"StackId\":21,\"StackName\":\"web\"}]");
+                    respond(exchange, 200,
+                            "[{\"Name\":\"demo\",\"StackId\":21,\"StackName\":\"web\",\"Status\":\"Ready\"}]");
                 }
+                return;
+            }
+            if (path != null && path.contains("/kubernetes/apis/apps/v1/namespaces/")
+                    && path.contains("/deployments/")
+                    && "GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                if (deploymentReady.get()) {
+                    respond(exchange, 200,
+                            "{\"metadata\":{\"name\":\"web\",\"namespace\":\"apps\"},"
+                                    + "\"spec\":{\"replicas\":1},"
+                                    + "\"status\":{\"readyReplicas\":1,\"availableReplicas\":1}}");
+                } else {
+                    respond(exchange, 200,
+                            "{\"metadata\":{\"name\":\"web\",\"namespace\":\"apps\"},"
+                                    + "\"spec\":{\"replicas\":1},"
+                                    + "\"status\":{\"readyReplicas\":0}}");
+                }
+                return;
+            }
+            if (path != null && path.contains("/kubernetes/api/v1/namespaces/")
+                    && path.endsWith("/pods")
+                    && "GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                respond(exchange, 200,
+                        "{\"items\":[{\"metadata\":{\"name\":\"web-0\"},"
+                                + "\"status\":{\"phase\":\"Pending\","
+                                + "\"containerStatuses\":[{\"name\":\"c\","
+                                + "\"state\":{\"waiting\":{\"reason\":\"CrashLoopBackOff\","
+                                + "\"message\":\"back-off\"}}}]}}]}");
                 return;
             }
             if (path != null && path.endsWith("/api/stacks/create/kubernetes/string")) {
@@ -143,6 +184,7 @@ public class PortainerManifestBuilderTest {
     @AfterEach
     public void stopServer() {
         System.clearProperty(ConnectionTester.ALLOW_LOOPBACK_FOR_TESTS_PROP);
+        System.clearProperty(KubernetesWait.POLL_INTERVAL_MS_PROP);
         if (server != null) {
             server.stop(0);
         }
@@ -215,7 +257,7 @@ public class PortainerManifestBuilderTest {
     }
 
     @Test
-    public void freestyle_createWithoutLiveResources_fails(JenkinsRule jenkins) throws Exception {
+    public void freestyle_configMapOnly_succeedsWithoutApplications(JenkinsRule jenkins) throws Exception {
         configurePortainer();
         applicationsEmpty.set(true);
         FreeStyleProject project = jenkins.createFreeStyleProject();
@@ -224,10 +266,56 @@ public class PortainerManifestBuilderTest {
         step.setStackFileContent(MANIFEST_YAML);
         project.getBuildersList().add(step);
 
-        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
-        jenkins.assertLogContains("Deploy finished but no live Kubernetes resources were found", build);
+        jenkins.buildAndAssertSuccess(project);
         assertTrue(createCalled.get());
-        assertFalse(putCalled.get());
+    }
+
+    @Test
+    public void freestyle_deploymentReady_succeeds(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerManifestBuilder step = new PortainerManifestBuilder("1", "web");
+        step.setStackSource(PortainerManifestBuilder.SOURCE_YAML);
+        step.setStackFileContent(DEPLOYMENT_YAML);
+        step.setWaitTimeoutSeconds("5");
+        project.getBuildersList().add(step);
+
+        jenkins.buildAndAssertSuccess(project);
+        assertTrue(createCalled.get());
+    }
+
+    @Test
+    public void freestyle_deploymentNotReady_timesOutWithPodsHint(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        deploymentReady.set(false);
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerManifestBuilder step = new PortainerManifestBuilder("1", "web");
+        step.setStackSource(PortainerManifestBuilder.SOURCE_YAML);
+        step.setStackFileContent(DEPLOYMENT_YAML);
+        step.setWaitTimeoutSeconds("1");
+        project.getBuildersList().add(step);
+
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Manifest workloads did not become ready", build);
+        jenkins.assertLogContains("CrashLoopBackOff", build);
+        assertTrue(createCalled.get());
+    }
+
+    @Test
+    public void freestyle_gitApplicationsMissing_timesOut(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        applicationsEmpty.set(true);
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerManifestBuilder step = new PortainerManifestBuilder("1", "web");
+        step.setStackSource(PortainerManifestBuilder.SOURCE_REPOSITORY);
+        step.setRepositoryUrl("https://gitlab.example/group/manifests.git");
+        step.setManifestFilePath("deploy.yaml");
+        step.setWaitTimeoutSeconds("1");
+        project.getBuildersList().add(step);
+
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Manifest applications did not become ready", build);
+        assertTrue(createCalled.get());
     }
 
     @Test
@@ -325,6 +413,32 @@ public class PortainerManifestBuilderTest {
         assertEquals(FormValidation.Kind.ERROR, d.doCheckRepositoryUrl("", "repository", project).kind);
         assertEquals(FormValidation.Kind.ERROR, d.doCheckStackFileContent("", "yaml", project).kind);
         assertEquals(FormValidation.Kind.OK, d.doCheckStackFileContent(MANIFEST_YAML, "yaml", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckStackFileContent(MANIFEST_YAML, "repository", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckStackFileContent("not yaml", "yaml", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckStackName("Bad Name", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckStackName("web", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckRepositoryUrl("", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.ERROR,
+                d.doCheckRepositoryUrl("https://u:p@gitlab.example/group/m.git", "repository", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckRepositoryUrl("https://gitlab.example/group/m.git", "repository", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckManifestFilePath("manifest.yaml", "repository", project).kind);
+    }
+
+    @Test
+    public void freestyle_invalidWaitTimeout_fails(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerManifestBuilder step = new PortainerManifestBuilder("1", "web");
+        step.setStackSource(PortainerManifestBuilder.SOURCE_YAML);
+        step.setStackFileContent(MANIFEST_YAML);
+        step.setWaitTimeoutSeconds("abc");
+        step.setValidateOnly(true);
+        project.getBuildersList().add(step);
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Wait timeout must be a positive number of seconds", build);
     }
 
     private void configurePortainer() {

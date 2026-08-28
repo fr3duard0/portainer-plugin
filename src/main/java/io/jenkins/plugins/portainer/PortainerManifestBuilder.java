@@ -5,10 +5,7 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.AbortException;
 import hudson.EnvVars;
 import hudson.Extension;
-import hudson.Launcher;
-import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
 import hudson.model.Item;
 import hudson.model.Run;
 import hudson.model.TaskListener;
@@ -33,15 +30,13 @@ import java.util.logging.Logger;
  * <p>
  * Kubernetes namespace comes from the manifest. This step does not send {@code Namespace}
  * in the Portainer API body. {@code stackName} is Portainer stack metadata only.
+ * After apply, workloads are polled until Ready ({@code waitTimeoutSeconds}).
  */
 public class PortainerManifestBuilder extends Builder implements SimpleBuildStep {
 
     private static final Logger LOGGER = Logger.getLogger(PortainerManifestBuilder.class.getName());
     private static final String MSG_STALE_BEFORE_UPDATE =
             "Portainer stack exists but no live Kubernetes resources were found. "
-                    + "Remove the stale stack in Portainer and retry.";
-    private static final String MSG_STALE_AFTER_APPLY =
-            "Deploy finished but no live Kubernetes resources were found. "
                     + "Remove the stale stack in Portainer and retry.";
 
     public static final String MODE_INHERIT = ConnectionMode.INHERIT;
@@ -50,6 +45,8 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
     public static final String SOURCE_YAML = StackSource.YAML;
     public static final String DEFAULT_MANIFEST_FILE = "manifest.yaml";
     public static final String DEFAULT_REPOSITORY_REFERENCE = PortainerStackBuilder.DEFAULT_REPOSITORY_REFERENCE;
+    public static final String DEFAULT_WAIT_TIMEOUT_SECONDS =
+            String.valueOf(KubernetesWait.DEFAULT_TIMEOUT_SECONDS);
 
     private final String endpointId;
     private final String stackName;
@@ -66,6 +63,7 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
     private String portainerCredentialsId;
     private boolean verboseLogging;
     private boolean validateOnly;
+    private String waitTimeoutSeconds;
 
     @DataBoundConstructor
     public PortainerManifestBuilder(String endpointId, String stackName) {
@@ -193,15 +191,22 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
         this.validateOnly = validateOnly;
     }
 
-    @Override
-    public boolean requiresWorkspace() {
-        return false;
+    public String getWaitTimeoutSeconds() {
+        return waitTimeoutSeconds == null || waitTimeoutSeconds.isBlank()
+                ? DEFAULT_WAIT_TIMEOUT_SECONDS
+                : waitTimeoutSeconds.trim();
+    }
+
+    @DataBoundSetter
+    public void setWaitTimeoutSeconds(String waitTimeoutSeconds) {
+        this.waitTimeoutSeconds = waitTimeoutSeconds == null || waitTimeoutSeconds.isBlank()
+                ? null
+                : waitTimeoutSeconds.trim();
     }
 
     @Override
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener)
-            throws InterruptedException, IOException {
-        return PortainerSteps.performFreestyle(build, launcher, listener, this);
+    public boolean requiresWorkspace() {
+        return false;
     }
 
     @Override
@@ -250,6 +255,11 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
 
             if (validateOnly) {
                 log.info("Validate-only — skipping deploy");
+                if (inputs.yamlMode) {
+                    log.debug("Would wait for manifest workloads timeoutSeconds=" + inputs.waitTimeoutSeconds);
+                } else {
+                    log.debug("Would wait for manifest applications timeoutSeconds=" + inputs.waitTimeoutSeconds);
+                }
                 summarize(log, startedNs, "validated", -1);
                 return;
             }
@@ -266,13 +276,17 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
         });
         final int endpoint = PortainerConnections.abortOn(
                 log, () -> PortainerConnections.resolveEndpointId(endpointId, buildEnv));
+        final int waitSeconds = PortainerConnections.abortOn(log, () -> {
+            String raw = waitTimeoutSeconds == null ? "" : buildEnv.expand(waitTimeoutSeconds).trim();
+            return KubernetesWait.parseTimeoutSeconds(raw);
+        });
         if (StackSource.isYaml(getStackSource())) {
-            return parseYamlInputs(log, endpoint);
+            return parseYamlInputs(log, endpoint, waitSeconds);
         }
-        return parseGitInputs(buildEnv, log, endpoint);
+        return parseGitInputs(buildEnv, log, endpoint, waitSeconds);
     }
 
-    private ManifestParsedInputs parseYamlInputs(PortainerBuildLogger log, int endpoint)
+    private ManifestParsedInputs parseYamlInputs(PortainerBuildLogger log, int endpoint, int waitSeconds)
             throws AbortException {
         String yamlContent = stackFileContent;
         if (yamlContent == null || yamlContent.isBlank()) {
@@ -283,10 +297,11 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
             requireLooksLikeYaml(validated);
             return null;
         });
-        return ManifestParsedInputs.yaml(endpoint, validated);
+        return ManifestParsedInputs.yaml(endpoint, validated, waitSeconds);
     }
 
-    private ManifestParsedInputs parseGitInputs(EnvVars buildEnv, PortainerBuildLogger log, int endpoint)
+    private ManifestParsedInputs parseGitInputs(
+            EnvVars buildEnv, PortainerBuildLogger log, int endpoint, int waitSeconds)
             throws AbortException {
         String repoUrl = PortainerConnections.abortOn(log, () -> GitRepositoryUrl.normalize(repositoryUrl));
         String manifestPath = PortainerConnections.abortOn(log, () -> PortainerComposePath.normalize(
@@ -294,7 +309,7 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
                         ? DEFAULT_MANIFEST_FILE
                         : buildEnv.expand(manifestFilePath)));
         String gitRef = PortainerStackBuilder.resolveRepositoryReference(repositoryReferenceName, buildEnv);
-        return ManifestParsedInputs.git(endpoint, repoUrl, gitRef, manifestPath);
+        return ManifestParsedInputs.git(endpoint, repoUrl, gitRef, manifestPath, waitSeconds);
     }
 
     private void logManifestPlan(
@@ -318,7 +333,7 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
         try {
             int existingId = resolveExistingStackId(client, connection, apiKey, inputs.endpoint, log);
             if (existingId >= 0) {
-                ManifestDeployVerifier.requireLiveResources(
+                ManifestDeployVerifier.requireNotStaleBeforeUpdate(
                         client,
                         connection,
                         apiKey,
@@ -341,14 +356,17 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
                         new ManifestGitDeployParams(inputs.repoUrl, inputs.manifestPath, inputs.gitRef, gitAuth));
             }
 
-            ManifestDeployVerifier.requireLiveResources(
+            ManifestDeployVerifier.waitAfterApply(
                     client,
                     connection,
                     apiKey,
                     inputs.endpoint,
                     deploy.stackId,
                     stackName,
-                    MSG_STALE_AFTER_APPLY);
+                    inputs.yamlMode,
+                    inputs.yamlContent,
+                    inputs.waitTimeoutSeconds,
+                    log);
 
             summarize(log, startedNs, deploy.outcome, deploy.stackId);
         } catch (AbortException e) {
@@ -356,6 +374,9 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
         } catch (IOException e) {
             throw PortainerConnections.abort(
                     log, "Manifest operation failed: " + PortainerConnections.truncateMessage(e), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw PortainerConnections.abort(log, "Manifest wait interrupted", e);
         }
     }
 
@@ -485,6 +506,7 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
         final String repoUrl;
         final String gitRef;
         final String manifestPath;
+        final int waitTimeoutSeconds;
 
         private ManifestParsedInputs(
                 int endpoint,
@@ -492,21 +514,25 @@ public class PortainerManifestBuilder extends Builder implements SimpleBuildStep
                 String yamlContent,
                 String repoUrl,
                 String gitRef,
-                String manifestPath) {
+                String manifestPath,
+                int waitTimeoutSeconds) {
             this.endpoint = endpoint;
             this.yamlMode = yamlMode;
             this.yamlContent = yamlContent;
             this.repoUrl = repoUrl;
             this.gitRef = gitRef;
             this.manifestPath = manifestPath;
+            this.waitTimeoutSeconds = waitTimeoutSeconds;
         }
 
-        static ManifestParsedInputs yaml(int endpoint, String yamlContent) {
-            return new ManifestParsedInputs(endpoint, true, yamlContent, null, null, null);
+        static ManifestParsedInputs yaml(int endpoint, String yamlContent, int waitTimeoutSeconds) {
+            return new ManifestParsedInputs(endpoint, true, yamlContent, null, null, null, waitTimeoutSeconds);
         }
 
-        static ManifestParsedInputs git(int endpoint, String repoUrl, String gitRef, String manifestPath) {
-            return new ManifestParsedInputs(endpoint, false, null, repoUrl, gitRef, manifestPath);
+        static ManifestParsedInputs git(
+                int endpoint, String repoUrl, String gitRef, String manifestPath, int waitTimeoutSeconds) {
+            return new ManifestParsedInputs(
+                    endpoint, false, null, repoUrl, gitRef, manifestPath, waitTimeoutSeconds);
         }
     }
 
