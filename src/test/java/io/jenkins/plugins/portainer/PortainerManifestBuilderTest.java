@@ -413,6 +413,32 @@ public class PortainerManifestBuilderTest {
         assertEquals(FormValidation.Kind.ERROR, d.doCheckRepositoryUrl("", "repository", project).kind);
         assertEquals(FormValidation.Kind.ERROR, d.doCheckStackFileContent("", "yaml", project).kind);
         assertEquals(FormValidation.Kind.OK, d.doCheckStackFileContent(MANIFEST_YAML, "yaml", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckStackFileContent(MANIFEST_YAML, "repository", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckStackFileContent("not yaml", "yaml", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckStackName("Bad Name", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckStackName("web", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckRepositoryUrl("", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.ERROR,
+                d.doCheckRepositoryUrl("https://u:p@gitlab.example/group/m.git", "repository", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckRepositoryUrl("https://gitlab.example/group/m.git", "repository", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckManifestFilePath("manifest.yaml", "repository", project).kind);
+    }
+
+    @Test
+    public void freestyle_invalidWaitTimeout_fails(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerManifestBuilder step = new PortainerManifestBuilder("1", "web");
+        step.setStackSource(PortainerManifestBuilder.SOURCE_YAML);
+        step.setStackFileContent(MANIFEST_YAML);
+        step.setWaitTimeoutSeconds("abc");
+        step.setValidateOnly(true);
+        project.getBuildersList().add(step);
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Wait timeout must be a positive number of seconds", build);
     }
 
     private void configurePortainer() {

@@ -667,6 +667,51 @@ class PortainerHelmBuilderTest {
         assertEquals(FormValidation.Kind.OK, d.doCheckValuesRepositoryUrl("", "none", project).kind);
         assertEquals(FormValidation.Kind.ERROR, d.doCheckValues("", "yaml", project).kind);
         assertEquals(FormValidation.Kind.OK, d.doCheckValues("", "none", project).kind);
+        assertEquals(
+                FormValidation.Kind.ERROR, d.doCheckValues("plain text", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckValues("replicaCount: 1\n", "yaml", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK, d.doCheckValuesFilePath("values.yaml", "repository", project).kind);
+        assertEquals(
+                FormValidation.Kind.OK,
+                d.doCheckValuesRepositoryUrl("https://gitlab.example/group/v.git", "repository", project)
+                        .kind);
+    }
+
+    @Test
+    void formValidation_releaseChartRepoNamespace(JenkinsRule jenkins) throws Exception {
+        PortainerHelmBuilder.DescriptorImpl d =
+                jenkins.getInstance().getDescriptorByType(PortainerHelmBuilder.DescriptorImpl.class);
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckReleaseName("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckReleaseName("$REL", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckReleaseName("nginx", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckChart("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckChart("nginx", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckRepo("", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckRepo("not-a-url", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckRepo("https://charts.example/helm", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("$NS", project).kind);
+        assertEquals(FormValidation.Kind.ERROR, d.doCheckNamespace("Bad_NS", project).kind);
+        assertEquals(FormValidation.Kind.OK, d.doCheckNamespace("default", project).kind);
+    }
+
+    @Test
+    void freestyle_invalidWaitTimeout_fails(JenkinsRule jenkins) throws Exception {
+        configurePortainer();
+        FreeStyleProject project = jenkins.createFreeStyleProject();
+        PortainerHelmBuilder step = new PortainerHelmBuilder(
+                "1", "nginx", "nginx", "https://charts.example/bitnami");
+        step.setValuesSource(PortainerHelmBuilder.VALUES_NONE);
+        step.setWaitTimeoutSeconds("0");
+        step.setValidateOnly(true);
+        project.getBuildersList().add(step);
+        FreeStyleBuild build = jenkins.buildAndAssertStatus(Result.FAILURE, project);
+        jenkins.assertLogContains("Wait timeout must be a positive number of seconds", build);
     }
 
     private void configurePortainer() {
