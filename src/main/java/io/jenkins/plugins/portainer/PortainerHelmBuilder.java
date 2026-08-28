@@ -6,9 +6,7 @@ import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
-import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
 import hudson.model.Item;
 import hudson.model.Run;
 import hudson.model.TaskListener;
@@ -298,12 +296,6 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
     @Override
     public boolean requiresWorkspace() {
         return HelmValuesSource.isRepository(getValuesSource());
-    }
-
-    @Override
-    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener)
-            throws InterruptedException, IOException {
-        return PortainerSteps.performFreestyle(build, launcher, listener, this);
     }
 
     @Override
