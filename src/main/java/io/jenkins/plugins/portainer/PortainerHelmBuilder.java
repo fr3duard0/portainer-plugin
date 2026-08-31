@@ -310,9 +310,10 @@ public class PortainerHelmBuilder extends Builder implements SimpleBuildStep {
     public void perform(
             @NonNull Run<?, ?> run,
             @NonNull FilePath workspace,
+            @NonNull EnvVars env,
             @NonNull Launcher launcher,
             @NonNull TaskListener listener) throws InterruptedException, IOException {
-        performHelm(run, run.getEnvironment(listener), workspace, launcher, listener);
+        performHelm(run, env, workspace, launcher, listener);
     }
 
     private void performHelm(

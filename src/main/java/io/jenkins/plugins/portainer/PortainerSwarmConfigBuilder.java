@@ -195,22 +195,23 @@ public class PortainerSwarmConfigBuilder extends Builder implements SimpleBuildS
     public void perform(
             @NonNull Run<?, ?> run,
             @NonNull FilePath workspace,
+            @NonNull EnvVars env,
             @NonNull Launcher launcher,
             @NonNull TaskListener listener) throws InterruptedException, IOException {
         try (PortainerBuildLogger log = new PortainerBuildLogger(LOGGER, listener, verboseLogging)) {
             log.open(PortainerBuildLogger.TITLE_STACK_CONFIG);
-            performBody(run, workspace, launcher, listener, log);
+            performBody(run, workspace, env, launcher, listener, log);
         }
     }
 
     private void performBody(
             Run<?, ?> run,
             FilePath workspace,
+            EnvVars buildEnv,
             Launcher launcher,
             TaskListener listener,
             PortainerBuildLogger log) throws InterruptedException, IOException {
         long startedNs = System.nanoTime();
-        EnvVars buildEnv = run.getEnvironment(listener);
 
         final int endpoint = PortainerConnections.abortOn(
                 log, () -> PortainerConnections.resolveEndpointId(endpointId, buildEnv));
